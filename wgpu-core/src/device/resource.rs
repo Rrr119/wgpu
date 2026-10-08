@@ -4557,9 +4557,7 @@ impl Device {
             None => None,
         };
 
-        let mut minimum_binding_sizes = FastHashMap::default();
-        let mut io = validation::StageIo::default();
-        let mut binding_layout_source;
+        let mut resources;
         let final_entry_point_name;
         let module;
 
@@ -4579,20 +4577,19 @@ impl Device {
 
             match shader_module_state {
                 pipeline::ShaderModuleState::NagaModule { ref interface, raw } => {
-                    binding_layout_source = match pipeline_layout {
+                    resources = validation::PipelineResources::new(match pipeline_layout {
                         Some(pipeline_layout) => {
                             validation::BindingLayoutSource::Provided(pipeline_layout)
                         }
                         None => validation::BindingLayoutSource::new_derived(&self.limits),
-                    };
+                    });
 
-                    io = interface
+                    interface
                         .check_stage(
-                            &mut binding_layout_source,
-                            &mut minimum_binding_sizes,
+                            &mut resources,
                             &final_entry_point_name,
                             stage,
-                            io,
+                            validation::StageIo::default(),
                             None,
                         )
                         .map_err(stage_err)?;
@@ -4602,8 +4599,9 @@ impl Device {
                 pipeline::ShaderModuleState::Passthrough { raw, .. } => {
                     match pipeline_layout {
                         Some(pipeline_layout) => {
-                            binding_layout_source =
-                                validation::BindingLayoutSource::Provided(pipeline_layout);
+                            resources = validation::PipelineResources::new(
+                                validation::BindingLayoutSource::Provided(pipeline_layout),
+                            );
                         }
                         None => {
                             return Err(pipeline::CreatePipelineError::Implicit(
@@ -4619,23 +4617,25 @@ impl Device {
             }
         }
 
-        let pipeline_layout = match binding_layout_source {
+        let pipeline_layout = match resources.layout {
             validation::BindingLayoutSource::Provided(pipeline_layout) => pipeline_layout,
             validation::BindingLayoutSource::Derived(entries) => {
-                self.create_derived_pipeline_layout(entries, io.immediates.size())?
+                self.create_derived_pipeline_layout(entries, resources.immediates.size())?
             }
         };
 
         let naga::valid::ImmediateUsage::Valid {
             slots: immediate_slots_required,
             size: _,
-        } = io.immediates
+        } = resources.immediates
         else {
             unreachable!("Immediates exceeding maxImmediateSize should have been rejected");
         };
 
-        let late_sized_buffer_groups =
-            Device::make_late_sized_buffer_groups(&minimum_binding_sizes, &pipeline_layout);
+        let late_sized_buffer_groups = Device::make_late_sized_buffer_groups(
+            &resources.minimum_binding_sizes,
+            &pipeline_layout,
+        );
 
         let cache = match desc.cache {
             Some(cache) => {
@@ -4751,8 +4751,6 @@ impl Device {
         use wgt::TextureFormatFeatureFlags as Tfff;
 
         self.check_is_valid()?;
-
-        let mut minimum_binding_sizes = FastHashMap::default();
 
         let color_targets = desc
             .fragment
@@ -5155,10 +5153,10 @@ impl Device {
             None => None,
         };
 
-        let mut binding_layout_source = match pipeline_layout {
+        let mut resources = validation::PipelineResources::new(match pipeline_layout {
             Some(pipeline_layout) => validation::BindingLayoutSource::Provided(pipeline_layout),
             None => validation::BindingLayoutSource::new_derived(&self.limits),
-        };
+        });
 
         let samples = {
             let sc = desc.multisample.count;
@@ -5208,8 +5206,7 @@ impl Device {
                         pipeline::ShaderModuleState::NagaModule { ref interface, raw } => {
                             io = interface
                                 .check_stage(
-                                    &mut binding_layout_source,
-                                    &mut minimum_binding_sizes,
+                                    &mut resources,
                                     &vertex_entry_point_name,
                                     stage,
                                     io,
@@ -5265,8 +5262,7 @@ impl Device {
                         pipeline::ShaderModuleState::NagaModule { ref interface, raw } => {
                             io = interface
                                 .check_stage(
-                                    &mut binding_layout_source,
-                                    &mut minimum_binding_sizes,
+                                    &mut resources,
                                     &task_entry_point_name,
                                     stage,
                                     io,
@@ -5320,8 +5316,7 @@ impl Device {
                         pipeline::ShaderModuleState::NagaModule { ref interface, raw } => {
                             io = interface
                                 .check_stage(
-                                    &mut binding_layout_source,
-                                    &mut minimum_binding_sizes,
+                                    &mut resources,
                                     &mesh_entry_point_name,
                                     stage,
                                     io,
@@ -5384,8 +5379,7 @@ impl Device {
                     pipeline::ShaderModuleState::NagaModule { ref interface, raw } => {
                         io = interface
                             .check_stage(
-                                &mut binding_layout_source,
-                                &mut minimum_binding_sizes,
+                                &mut resources,
                                 &fragment_entry_point_name,
                                 stage,
                                 io,
@@ -5458,17 +5452,17 @@ impl Device {
             return Err(pipeline::ImplicitLayoutError::ReflectionError(last_stage).into());
         }
 
-        let pipeline_layout = match binding_layout_source {
+        let pipeline_layout = match resources.layout {
             validation::BindingLayoutSource::Provided(pipeline_layout) => pipeline_layout,
             validation::BindingLayoutSource::Derived(entries) => {
-                self.create_derived_pipeline_layout(entries, io.immediates.size())?
+                self.create_derived_pipeline_layout(entries, resources.immediates.size())?
             }
         };
 
         let naga::valid::ImmediateUsage::Valid {
             slots: immediate_slots_required,
             size: _,
-        } = io.immediates
+        } = resources.immediates
         else {
             unreachable!("Immediates exceeding maxImmediateSize should have been rejected");
         };
@@ -5520,7 +5514,7 @@ impl Device {
             .flags
             .contains(wgt::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED)
         {
-            for (binding, size) in minimum_binding_sizes.iter() {
+            for (binding, size) in resources.minimum_binding_sizes.iter() {
                 if size.get() % 16 != 0 {
                     return Err(pipeline::RenderError::UnalignedShader {
                         binding: binding.binding,
@@ -5532,8 +5526,10 @@ impl Device {
             }
         }
 
-        let late_sized_buffer_groups =
-            Device::make_late_sized_buffer_groups(&minimum_binding_sizes, &pipeline_layout);
+        let late_sized_buffer_groups = Device::make_late_sized_buffer_groups(
+            &resources.minimum_binding_sizes,
+            &pipeline_layout,
+        );
 
         let cache = match desc.cache {
             Some(cache) => {
