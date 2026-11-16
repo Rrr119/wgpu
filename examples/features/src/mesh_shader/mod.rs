@@ -1,5 +1,15 @@
+enum RenderPath {
+    Mesh(wgpu::RenderPipeline),
+    Vertex(wgpu::RenderPipeline),
+}
+
+fn supports_mesh_shaders(features: wgpu::Features) -> bool {
+    features
+        .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS)
+}
+
 pub struct Example {
-    pipeline: wgpu::RenderPipeline,
+    path: RenderPath,
 }
 impl crate::framework::Example for Example {
     fn init(
@@ -8,41 +18,70 @@ impl crate::framework::Example for Example {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
             immediate_size: 0,
         });
-        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            task: Some(wgpu::TaskState {
-                module: &shader,
-                entry_point: Some("ts_main"),
-                compilation_options: Default::default(),
-            }),
-            mesh: wgpu::MeshState {
-                module: &shader,
-                entry_point: Some("ms_main"),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.view_formats[0].into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
-        Self { pipeline }
+        let primitive = wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        };
+
+        let path = if supports_mesh_shaders(device.features()) {
+            let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+            RenderPath::Mesh(device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+                label: None,
+                layout: Some(&pipeline_layout),
+                task: Some(wgpu::TaskState {
+                    module: &shader,
+                    entry_point: Some("ts_main"),
+                    compilation_options: Default::default(),
+                }),
+                mesh: wgpu::MeshState {
+                    module: &shader,
+                    entry_point: Some("ms_main"),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(config.view_formats[0].into())],
+                }),
+                primitive,
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            }))
+        } else {
+            let shader = device.create_shader_module(wgpu::include_wgsl!("fallback.wgsl"));
+            RenderPath::Vertex(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mesh shader fallback"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(config.view_formats[0].into())],
+                    }),
+                    primitive,
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            )
+        };
+        Self { path }
     }
     fn render(&mut self, view: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue) {
         let mut encoder =
@@ -70,21 +109,34 @@ impl crate::framework::Example for Example {
                 multiview_mask: None,
             });
             rpass.push_debug_group("Prepare data for draw.");
-            rpass.set_pipeline(&self.pipeline);
+            let pipeline = match &self.path {
+                RenderPath::Mesh(pipeline) | RenderPath::Vertex(pipeline) => pipeline,
+            };
+            rpass.set_pipeline(pipeline);
             rpass.pop_debug_group();
             rpass.insert_debug_marker("Draw!");
-            rpass.draw_mesh_tasks(1, 1, 1);
+            match &self.path {
+                RenderPath::Mesh(_) => rpass.draw_mesh_tasks(1, 1, 1),
+                RenderPath::Vertex(_) => rpass.draw(0..3, 0..1),
+            }
         }
         queue.submit(Some(encoder.finish()));
     }
     fn required_downlevel_capabilities() -> wgpu::DownlevelCapabilities {
         Default::default()
     }
-    fn required_features() -> wgpu::Features {
+    fn optional_features() -> wgpu::Features {
         wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS
     }
     fn required_limits() -> wgpu::Limits {
         wgpu::Limits::defaults().using_recommended_minimum_mesh_shader_values()
+    }
+    fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        if supports_mesh_shaders(adapter.features()) {
+            Self::required_limits()
+        } else {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        }
     }
     fn resize(
         &mut self,

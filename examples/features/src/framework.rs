@@ -34,6 +34,10 @@ pub trait Example: 'static + Sized {
         wgpu::Limits::downlevel_webgl2_defaults() // These downlevel limits will allow the code to run on all possible hardware
     }
 
+    fn required_limits_for_adapter(_adapter: &wgpu::Adapter) -> wgpu::Limits {
+        Self::required_limits()
+    }
+
     fn init(
         config: &wgpu::SurfaceConfiguration,
         adapter: &wgpu::Adapter,
@@ -282,7 +286,8 @@ impl ExampleContext {
         )
         .await;
         // Make sure we use the texture resolution limits from the adapter, so we can support images the size of the surface.
-        let needed_limits = E::required_limits().using_resolution(adapter.limits());
+        let needed_limits =
+            E::required_limits_for_adapter(&adapter).using_resolution(adapter.limits());
 
         let info = adapter.get_info();
         log::info!("Selected adapter: {} ({:?})", info.name, info.backend);

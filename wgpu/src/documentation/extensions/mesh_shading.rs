@@ -85,6 +85,50 @@ An example of using mesh shaders to render a single triangle can be seen
 - Queries are unsupported
 - Primitive index support will be added once support lands in for them in general.
 
+### Backend support and fallback
+
+Mesh shader support is advertised per adapter through [`crate::Adapter::features`].
+The feature is currently exposed by Vulkan, DX12, and Metal, but not by GLES or
+WebGPU. Requesting a device with [`Features::EXPERIMENTAL_MESH_SHADER`] when
+the adapter does not expose it fails device creation, and
+[`Device::create_mesh_pipeline`] requires the feature to be enabled on the
+device.
+
+`wgpu` cannot automatically lower an arbitrary mesh or task shader pipeline to
+the vertex pipeline. A task shader controls the mesh dispatch grid and passes a
+payload, while a mesh shader produces per-workgroup vertices, primitives, and
+per-primitive fragment inputs. None of these have a general vertex-shader
+equivalent. Applications that must run on every adapter should therefore keep
+a standard render pipeline and select it after querying the adapter:
+
+```rust,ignore
+let mesh_features =
+    wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS;
+let mesh_supported = adapter.features().contains(mesh_features);
+
+let (device, queue) = adapter
+    .request_device(&wgpu::DeviceDescriptor {
+        required_features: if mesh_supported {
+            mesh_features
+        } else {
+            wgpu::Features::empty()
+        },
+        required_limits: if mesh_supported {
+            wgpu::Limits::defaults().using_recommended_minimum_mesh_shader_values()
+        } else {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        },
+        // SAFETY: enabling experimental features is an explicit opt-in.
+        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+        ..Default::default()
+    })
+    .await?;
+```
+
+The [`mesh_shader` example](https://github.com/gfx-rs/wgpu/tree/trunk/examples/features/src/mesh_shader)
+follows this pattern to render the same triangle with a mesh pipeline when the
+feature is available and with a vertex pipeline otherwise.
+
 ### Limits
 
 > **NOTE**: More limits will be added when support is added to `naga`.
